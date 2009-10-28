@@ -96,16 +96,15 @@ static int spawn_w32(char** argv, int* status) {
   si.wShowWindow = SW_SHOWNORMAL;
 
   if (status) *status = -1;
-  //for (n = 0; argv[n]; n++) {
   for (args = argv; *args; args++) {
     int len = strlen(*args);
     if (cmdline) {
         cmdline = (char*) realloc(cmdline, strlen(cmdline) + len + 4);
-		strcat(cmdline, " \"");
+        strcat(cmdline, " \"");
     } else {
       cmdline = (char*) malloc(len + 5);
       strcpy(cmdline, "\"");
-	}
+    }
     if (!cmdline) return -1;
     strcat(cmdline, *args);
     strcat(cmdline, "\"");
