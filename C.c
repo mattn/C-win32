@@ -25,21 +25,38 @@
  */
 
 
-#include <ctype.h>
-#include <dirent.h>
-#include <errno.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/param.h>
-#include <sys/signal.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <time.h>
-
-#include <unistd.h>
+#ifndef _WIN32
+# include <ctype.h>
+# include <dirent.h>
+# include <errno.h>
+# include <stdarg.h>
+# include <stdio.h>
+# include <stdlib.h>
+# include <string.h>
+# include <sys/param.h>
+# include <sys/signal.h>
+# include <sys/wait.h>
+# include <sys/stat.h>
+# include <time.h>
+# include <unistd.h>
+# define A_OUT "a.out"
+#else
+# define lstat(p,s) stat(p,s)
+# include <windows.h>
+# include <ctype.h>
+# include <dirent.h>
+# include <errno.h>
+# include <stdarg.h>
+# include <stdio.h>
+# include <stdlib.h>
+# include <string.h>
+# include <signal.h>
+# include <sys/stat.h>
+# include <time.h>
+# undef mkdir
+# define mkdir(p,m) _mkdir(p)
+# define A_OUT "a.exe"
+#endif
 
 
 #define VERSION_STR "0.06"
@@ -68,6 +85,44 @@ char** lopts;
 char spec[65536];
 int spec_size; // -1 if not used
 
+#ifdef _WIN32
+static int spawn_w32(char** argv, int* status) {
+  char** args = argv;
+  DWORD ret = -1;
+  char* cmdline = NULL;
+  STARTUPINFO si = { sizeof(STARTUPINFO) };
+  PROCESS_INFORMATION pi;
+  si.dwFlags = STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_SHOWNORMAL;
+
+  if (status) *status = -1;
+  //for (n = 0; argv[n]; n++) {
+  for (args = argv; *args; args++) {
+    int len = strlen(*args);
+    if (cmdline) {
+        cmdline = (char*) realloc(cmdline, strlen(cmdline) + len + 4);
+		strcat(cmdline, " \"");
+    } else {
+      cmdline = (char*) malloc(len + 5);
+      strcpy(cmdline, "\"");
+	}
+    if (!cmdline) return -1;
+    strcat(cmdline, *args);
+    strcat(cmdline, "\"");
+  }
+
+  if (CreateProcess(NULL, (char*) cmdline, NULL, NULL, TRUE,
+      NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &ret);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (status) *status = 0;
+  }
+  free(cmdline);
+  return ret;
+}
+#endif
 
 static void cmd_error(char* fmt, ...);
 
@@ -140,7 +195,8 @@ static void show_version(void)
 	"This is free software; see the source for copying conditions.  There is NO\n"
 	"warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n"
 	"\n"
-	"Written by Kazuho Oku (http://labs.cybozu.co.jp/blog/kazuhoatwork/)\n",
+	"Written by Kazuho Oku (http://labs.cybozu.co.jp/blog/kazuhoatwork/)\n"
+	"Win32 Porting by Yasuhiro Matsumoto (http://mattn.kaoriya.net/)\n",
 	stdout);
   exit(0);
 }
@@ -324,6 +380,25 @@ static void save_specs(void)
 
 static int call_proc(char** argv, char* errmsg)
 {
+#ifdef _WIN32
+  int status, ret;
+  ret = spawn_w32(argv, &status);
+  if (status) {
+    LPVOID buf = "";
+    FormatMessage(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER |
+      FORMAT_MESSAGE_FROM_SYSTEM,
+      NULL,
+      GetLastError(),
+      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPTSTR) &buf,
+      0,
+      NULL);
+    cmd_error("%s: %s : %s\n", errmsg, argv[0], buf);
+    LocalFree(buf);
+  }
+  return status;
+#else
   pid_t pid;
   int status;
 
@@ -349,6 +424,7 @@ static int call_proc(char** argv, char* errmsg)
     cmd_error(NULL); /* silently exit(255) */
   }
   return WEXITSTATUS(status);
+#endif
 }
 
 
@@ -500,6 +576,17 @@ static char** parse_args(char** argv, char* file, int line)
 
 void setup_dir(void)
 {
+#ifdef _WIN32
+  char* dirname;
+  int old_umask = -1;
+  
+  char tmppath[MAX_PATH];
+  if (GetTempPath(sizeof(tmppath), tmppath) == 0) {
+    cmd_error("failed to stat tmpdir\n");
+  }
+  tmppath[strlen(tmppath)-1] = 0;
+  root_dir = str_dup(tmppath);
+#else
   char* dirname, buf[sizeof("/LARGE_C-01234567")];
   uid_t euid = geteuid();
   int old_umask = -1;
@@ -521,6 +608,8 @@ void setup_dir(void)
       }
     }
   }
+#endif
+
   /* make subdirs */
   dirname = str_concat(str_dup(root_dir), "/cache");
   mkdir(dirname, 0777);
@@ -583,11 +672,22 @@ int main(int argc, char** argv)
   /* use cache if possible */
   if (store_dir != NULL && check_specs()) {
     char** child_argv = NULL;
+#ifdef _WIN32
+    _utime(store_dir, NULL); /* update mtime of the directory */
+#else
     utimes(store_dir, NULL); /* update mtime of the directory */
-    exec_file = str_concat(str_dup(store_dir), "/a.out");
+#endif
+    exec_file = str_concat(str_dup(store_dir), "/"A_OUT);
     child_argv = sa_concat(child_argv, exec_file);
-    child_argv = sa_merge(child_argv, argv + 1);
+#ifdef _WIN32
+    {
+      int status;
+	  ret = spawn_w32(child_argv, &status);
+      if (status == 0) exit(ret);
+    }
+#else
     execv(exec_file, child_argv);
+#endif
     // if execv failed, we compile
     free(exec_file);
     remove_dir(store_dir);
@@ -595,7 +695,7 @@ int main(int argc, char** argv)
   
   /* prepare files */
   make_temp_dir();
-  exec_file = str_concat(str_dup(temp_dir), "/a.out");
+  exec_file = str_concat(str_dup(temp_dir), "/"A_OUT);
   c_file = str_concat(str_dup(temp_dir), "/source.c");
   if ((src_fp = fopen(c_file, "wt")) == NULL) {
     cmd_error("failed to create temporary file: %s : %s\n", c_file,
